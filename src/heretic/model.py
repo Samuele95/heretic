@@ -93,6 +93,20 @@ def _collapse_flattened_residual_streams(
     )
 
 
+def _get_last_position(tensor: Tensor, prompt_count: int) -> Tensor:
+    """
+    Extract the vectors at the last position of each prompt.
+
+    Module inputs and outputs usually have shape (prompt, position, component),
+    but some MoE blocks (e.g. the shared expert in Qwen3.5/3.6 MoE) flatten them
+    to (prompt * position, component) before calling their submodules.
+    Prompts are left-padded, so the last position is the last prompt token.
+    """
+    if tensor.dim() == 2:
+        tensor = tensor.reshape(prompt_count, -1, tensor.shape[-1])
+    return tensor[:, -1, :]
+
+
 # Some chat templates (e.g. gpt-oss) insert the current date into the prompt,
 # which makes the residuals, and therefore the modified model, depend on the day
 # Heretic is run. Rendering templates with a fixed date keeps results reproducible.
@@ -833,12 +847,13 @@ class Model:
                 # Each module should be invoked at most once per inference step.
                 assert module_index not in module_io[layer_index][component]
 
-                # inputs[0] and outputs have shape (prompt, position, component),
-                # so this extracts the input/output at the end of each prompt.
+                # This extracts the input/output at the end of each prompt.
                 # Move to CPU to decouple from device assignments, which can
                 # change between model reloads in multi-GPU configurations.
-                input = inputs[0][:, -1, :].detach().clone().cpu()
-                output = outputs[:, -1, :].detach().clone().cpu()
+                input = _get_last_position(inputs[0], len(prompts))
+                input = input.detach().clone().cpu()
+                output = _get_last_position(outputs, len(prompts))
+                output = output.detach().clone().cpu()
 
                 # The modules associated with a component (e.g. expert MLPs)
                 # are not necessarily invoked in order, nor are all of them
